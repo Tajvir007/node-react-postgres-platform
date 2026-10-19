@@ -260,24 +260,263 @@ This document records the local Docker Compose implementation for Task 1. Kubern
 
 ## Task 2 — Kubernetes
 
-Requires a local cluster (`kind` or `minikube`) with images built and loaded
-(or pushed to a registry the cluster can pull from):
 
-```bash
-kubectl apply -f k8s/namespace-dev.yaml
-kubectl apply -n dev -f k8s/
+cd ~/Devops/Devops-Project/node-react-postgres-platform
+
+mkdir -p docs/screenshots
+
+cat >> README.md <<'EOF'
+
+---
+
+# Task 2 — Kubernetes Deployment
+
+## Objective
+
+Deploy the React frontend, Node.js backend, PostgreSQL database, and Redis service to a local Kubernetes cluster using Kind.
+
+## Architecture
+
+```text
+                 Browser
+                    |
+                    | localhost:8081
+                    v
+          Kubernetes Frontend Service
+                    |
+                    v
+             Frontend Pod
+              NGINX :80
+
+          Backend Service
+                    |
+                    v
+              Backend Pod
+              Node.js :3000
+               /       \
+              v         v
+     PostgreSQL       Redis
+     Service :5432   Service :6379
+          |               |
+          v               v
+     PostgreSQL Pod    Redis Pod
+          |
+          v
+     PersistentVolumeClaim
+        postgres-pvc
 ```
 
-- `dev` namespace holds everything.
-- `backend-service` / `postgres-service` are `ClusterIP` — internal only.
-- `frontend-service` is `NodePort` (30080) for direct access; Task 3 adds
-  Ingress on top for a friendlier path.
-- Postgres uses a `PersistentVolumeClaim` bound to a `hostPath` PV so data
-  survives pod restarts.
-- `backend` has `readinessProbe`/`livenessProbe` hitting `/api/health/ready`
-  and `/api/health/live` respectively — readiness checks the DB is
-  reachable, liveness only checks the process is up (so a slow DB doesn't
-  cause pointless container restarts).
+> Note: Frontend and Backend were tested separately using `kubectl port-forward`. End-to-end frontend-to-backend routing must be verified separately if the NGINX configuration does not proxy `/api` requests.
+
+## Kubernetes Resources
+
+| Resource | Name | Purpose |
+|---|---|---|
+| Namespace | `dev` | Isolates application resources |
+| ConfigMap | `app-config` | Stores non-sensitive application settings |
+| Secret | `app-secrets` | Stores database credentials |
+| Deployment | `frontend` | Runs the NGINX-based React frontend |
+| Service | `frontend` | Exposes frontend inside the cluster |
+| Deployment | `backend` | Runs the Node.js API |
+| Service | `backend` | Exposes backend internally on port 3000 |
+| Deployment | `postgres` | Runs PostgreSQL |
+| Service | `postgres` | Exposes PostgreSQL internally on port 5432 |
+| PVC | `postgres-pvc` | Provides persistent database storage |
+| Deployment | `redis` | Runs Redis |
+| Service | `redis` | Exposes Redis internally on port 6379 |
+
+## Directory Structure
+
+```text
+k8s/
+├── namespace-dev.yaml
+├── postgres.yaml
+├── redis.yaml
+├── backend.yaml
+└── frontend.yaml
+
+docs/
+└── screenshots/
+    ├── task2-kubernetes-resources.png
+    ├── task2-frontend.png
+    ├── task2-backend-health.png
+    └── task2-postgres-pvc.png
+```
+
+## Deployment Steps
+
+### 1. Verify the Kind cluster
+
+```bash
+kubectl cluster-info --context kind-dev-cluster
+kubectl get nodes
+```
+
+### 2. Apply PostgreSQL and Redis
+
+```bash
+kubectl apply -f k8s/postgres.yaml
+kubectl apply -f k8s/redis.yaml
+```
+
+### 3. Verify the database storage
+
+```bash
+kubectl get pvc -n dev
+```
+
+Expected result: `postgres-pvc` should have status `Bound`.
+
+### 4. Deploy the backend
+
+```bash
+kubectl apply -f k8s/backend.yaml
+kubectl rollout status deployment/backend -n dev
+```
+
+The backend uses the `app-config` ConfigMap and `app-secrets` Secret for its environment configuration.
+
+### 5. Deploy the frontend
+
+```bash
+kubectl apply -f k8s/frontend.yaml
+kubectl rollout status deployment/frontend -n dev
+```
+
+### 6. Verify all application resources
+
+```bash
+kubectl get deployments,pods,services -n dev
+kubectl get pvc -n dev
+kubectl get endpoints -n dev
+```
+
+## Application Verification
+
+### Frontend
+
+Forward local port 8081 to the Kubernetes frontend Service:
+
+```bash
+kubectl port-forward -n dev service/frontend 8080:80
+```
+
+Open the following URL in a browser:
+
+```text
+http://localhost:8080
+```
+
+Check the HTTP response from a separate terminal:
+
+```bash
+curl -I http://localhost:8080
+```
+
+Expected result: `HTTP/1.1 200 OK`.
+
+### Backend Health Checks
+
+Forward local port 3001 to the Kubernetes backend Service:
+
+```bash
+kubectl port-forward -n dev service/backend 3001:3000
+```
+
+Run these commands in a separate terminal:
+
+```bash
+curl -i http://127.0.0.1:3001/api/health/live
+curl -i http://127.0.0.1:3001/api/health/ready
+curl -i http://127.0.0.1:3001/api/health/redis
+```
+
+The three endpoints returned HTTP 200 during testing.
+
+### PostgreSQL Storage Verification
+
+```bash
+kubectl get pvc -n dev
+kubectl get pods -n dev
+kubectl logs -n dev deployment/postgres --tail=50
+```
+
+Expected result: the PVC is `Bound`, and the PostgreSQL Pod is `Running`.
+
+## Screenshots
+
+### 1. Kubernetes Resources
+
+![Task 2 Kubernetes resources](docs/screenshots/task2-kubernetes-resources.png)
+
+*Evidence: Deployments, Pods, Services, and their readiness status.*
+
+### 2. Frontend Application
+
+![Task 2 frontend application](docs/screenshots/task2-frontend.png)
+
+*Evidence: React frontend successfully served by NGINX through the Kubernetes frontend Service.*
+
+### 3. Backend Health Checks
+
+![Task 2 backend health checks](docs/screenshots/task2-backend-health.png)
+
+*Evidence: HTTP responses from the backend liveness, readiness, and Redis health endpoints.*
+
+### 4. PostgreSQL Persistent Storage
+
+![Task 2 PostgreSQL PVC](docs/screenshots/task2-postgres-pvc.png)
+
+*Evidence: PostgreSQL PVC status is Bound and the database Pod is Running.*
+
+## Troubleshooting
+
+### Local port is already in use
+
+If port 3000 or 8080 is occupied by another application, use different local ports:
+
+```bash
+kubectl port-forward -n dev service/backend 3001:3000
+kubectl port-forward -n dev service/frontend 8081:80
+```
+
+The local port is on the left; the Kubernetes Service port is on the right.
+
+### Backend CreateContainerConfigError
+
+Inspect the Pod events:
+
+```bash
+kubectl describe pod -n dev -l app=backend
+kubectl describe secret app-secrets -n dev
+```
+
+Verify that every key referenced by `secretKeyRef` exists in the Secret. In this setup, the backend requires `DB_USER` and `DB_PASSWORD`.
+
+### Inspect application logs
+
+```bash
+kubectl logs -n dev deployment/backend --tail=100
+kubectl logs -n dev deployment/frontend --tail=100
+kubectl logs -n dev deployment/postgres --tail=100
+kubectl logs -n dev deployment/redis --tail=100
+```
+
+## Current Status
+
+- [x] Kind cluster is available.
+- [x] PostgreSQL Deployment and Service are running.
+- [x] PostgreSQL PVC is Bound.
+- [x] Redis Deployment and Service are running.
+- [x] Backend Deployment and Service are running.
+- [x] Backend health endpoints return HTTP 200.
+- [x] Frontend Deployment and Service are running.
+- [x] Frontend is accessible using port-forward.
+- [ ] Verify frontend-to-backend API routing end to end.
+- [ ] Complete any required external frontend exposure using NodePort or Ingress.
+
+EOF
+
 
 ## Task 3 — Ingress / API Gateway
 
