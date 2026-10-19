@@ -216,25 +216,25 @@ This stops and removes the Compose containers and network but preserves the name
 
 #### 1. Docker Compose Service Status
 
-(docs/screenshots/task1-docker-compose.png)
+![Docker Compose Service Status](docs/screenshots/task1-docker-compose.png)
 
 Shows the status of the frontend, backend, and PostgreSQL services.
 
 #### 2. Frontend Application
 
-(docs/screenshots/task1-frontend.png)
+![Frontend Application](docs/screenshots/task1-frontend.png)
 
 Shows the application running in the browser.
 
 #### 3. API Health Check
 
-(docs/screenshots/task1-api-health.png)
+![API Health Check](docs/screenshots/task1-api-health.png)
 
 Shows the HTTP response from the backend health endpoint through NGINX.
 
 #### 4. PostgreSQL Verification
 
-(docs/screenshots/task1-postgres.png)
+![PostgreSQL Verification](docs/screenshots/task1-postgres.png)
 
 Shows the database table listing or another successful database verification command.
 
