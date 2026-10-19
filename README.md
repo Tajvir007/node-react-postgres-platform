@@ -22,20 +22,241 @@ observability/scaling.
 
 ---
 
-## Task 1 — Local Docker Compose
+# Cloudly DevOps Assessment — Task 1
 
-```bash
-docker compose up --build
+## Docker Compose Local Development Environment
+
+### Overview
+
+Task 1 configures a React/Vite frontend, Node.js backend, and PostgreSQL database using Docker Compose.
+
+The objective is to run the application locally with containerized services, persistent database storage, environment-based configuration, service health checks, and frontend-to-backend communication.
+
+### Architecture
+
+```text
+Browser
+   |
+   | http://localhost:8080
+   v
+Frontend Container (NGINX)
+   |
+   | /api/ requests
+   v
+Backend Container (Node.js)
+   |
+   | PostgreSQL connection
+   v
+PostgreSQL Container
+   |
+   v
+Named Volume: postgres_data
 ```
 
-- Frontend: http://localhost:8080
-- Backend:  http://localhost:4000/api/health
-- Postgres: localhost:5432 (persisted in the `postgres_data` volume)
+### Technology Stack
 
-Both Dockerfiles use multi-stage builds (deps/build stage discarded, only
-`node_modules` + source or the compiled static bundle ship in the final
-image). No secrets are hardcoded — DB/Redis/search connection info comes from
-environment variables (see `docker-compose.yml` and `backend/.env.example`).
+- Docker and Docker Compose
+- React / Vite
+- Node.js
+- NGINX
+- PostgreSQL 16 Alpine
+- Environment variables and Docker named volumes
+- Container health checks
+
+### Project Structure
+
+```text
+.
+├── backend/
+├── frontend/
+├── docs/
+│   └── screenshots/
+├── Dockerfile.backend
+├── Dockerfile.frontend
+├── docker-compose.yaml
+├── nginx.conf
+├── .dockerignore
+├── .env
+└── README.md
+```
+
+### Configuration
+
+The `.env` file provides local configuration for the database, backend, frontend port, and other service settings.
+
+Example values:
+
+```dotenv
+POSTGRES_DB=appdb
+POSTGRES_USER=appuser
+POSTGRES_PASSWORD=replace_with_local_password
+
+DB_HOST=postgres
+DB_PORT=5432
+DB_NAME=appdb
+DB_USER=appuser
+DB_PASSWORD=replace_with_local_password
+
+FRONTEND_PORT=8080
+```
+
+**Security:** The actual `.env` file must not be committed to Git. Use `.env.example` with placeholder values for sharing configuration. Do not include real passwords in screenshots.
+
+### Docker Compose Services
+
+| Service         | Purpose                                                         |
+| --------------- | --------------------------------------------------------------- |
+| `frontend`      | Serves the built frontend through NGINX and publishes port 8080 |
+| `backend`       | Runs the Node.js API on container port 3000                     |
+| `postgres`      | Stores application data in PostgreSQL                           |
+| `postgres_data` | Persists PostgreSQL data across container recreation            |
+| `app-network`   | Allows containers to communicate by service name                |
+
+### Implementation Details
+
+#### 1. Containerized frontend and backend
+
+Separate Dockerfiles are used for the frontend and backend. The frontend Dockerfile builds the Vite application and serves the resulting static files through NGINX.
+
+#### 2. Internal service communication
+
+The backend connects to PostgreSQL using the Compose service hostname `postgres`, not `localhost`. Within a container, `localhost` refers to that same container.
+
+#### 3. Persistent database storage
+
+The named volume `postgres_data` is mounted at `/var/lib/postgresql/data`. This preserves database files when the PostgreSQL container is stopped or recreated.
+
+#### 4. Health checks and startup order
+
+PostgreSQL uses `pg_isready` to check database readiness. The backend health check requests `/api/health`.
+
+Compose uses `depends_on` with `condition: service_healthy` so dependent services wait for the configured health checks.
+
+#### 5. Frontend API routing
+
+NGINX proxies API requests to the backend service. The frontend accesses the API through the same public origin, avoiding the need to expose the backend port directly to the host.
+
+### Setup and Execution
+
+#### Step 1 — Validate Compose configuration
+
+```bash
+docker compose config
+```
+
+This checks whether the Compose file and interpolated configuration are valid.
+
+#### Step 2 — Build and start services
+
+```bash
+docker compose up -d --build
+```
+
+This builds the application images and starts the services in detached mode.
+
+#### Step 3 — Check service status
+
+```bash
+docker compose ps
+```
+
+Check that the frontend and backend are running and the database is healthy.
+
+#### Step 4 — View service logs
+
+```bash
+docker compose logs --tail=100
+```
+
+To inspect one service:
+
+```bash
+docker compose logs backend
+docker compose logs postgres
+docker compose logs frontend
+```
+
+#### Step 5 — Verify the application
+
+Open the frontend:
+
+```text
+http://localhost:8080
+```
+
+Check the API health endpoint:
+
+```bash
+curl -i http://localhost:8080/api/health
+```
+
+The health endpoint should return a successful HTTP response.
+
+#### Step 6 — Verify PostgreSQL
+
+```bash
+docker compose exec postgres \
+  psql -U appuser -d appdb \
+  -c '\dt'
+```
+
+This lists tables in the configured database. Replace the username or database name if your `.env` uses different values.
+
+#### Step 7 — Stop the services
+
+```bash
+docker compose down
+```
+
+This stops and removes the Compose containers and network but preserves the named database volume.
+
+**Warning:** `docker compose down -v` also removes the named volume and can delete local database data. Do not use it unless you intentionally want to remove that data.
+
+### Screenshots and Evidence
+
+#### 1. Docker Compose Service Status
+
+
+
+Shows the status of the frontend, backend, and PostgreSQL services.
+
+#### 2. Frontend Application
+
+
+
+Shows the application running in the browser.
+
+#### 3. API Health Check
+
+
+
+Shows the HTTP response from the backend health endpoint through NGINX.
+
+#### 4. PostgreSQL Verification
+
+
+
+Shows the database table listing or another successful database verification command.
+
+> Replace these image paths with your actual screenshot filenames. Remove any screenshot section for which you do not have evidence.
+
+### Task 1 Completion Checklist
+
+- [x] Frontend Docker image builds successfully.
+- [x] Backend Docker image builds successfully.
+- [x] PostgreSQL starts with the configured database and credentials.
+- [x] Database data uses a named volume.
+- [x] Health checks are configured and verified.
+- [x] Frontend is accessible through the published host port.
+- [x] API health endpoint responds successfully.
+- [x] PostgreSQL connectivity and schema are verified.
+- [x] Screenshots are saved under `docs/screenshots/`.
+- [x] `.env` and secrets are excluded from Git.
+
+### Notes
+
+This document records the local Docker Compose implementation for Task 1. Kubernetes, CI/CD, caching, search, monitoring, and logging belong to later assessment tasks.
+
 
 ## Task 2 — Kubernetes
 
