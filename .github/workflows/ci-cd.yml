@@ -1,96 +1,195 @@
-name: CI/CD
+
+# Cloudly DevOps Assessment - Task 4
+# CI -> Docker Build -> GHCR Push -> Kubernetes Deploy / Rollback
+
+name: CI-CD Pipeline
 
 on:
   push:
     branches:
+      - main
       - master
-      - "pre-release/v*"
-      - "release/v*"
+      - 'pre-release/v*'
+      - 'release/v*'
+
+  # Manual rollback from GitHub Actions.
   workflow_dispatch:
     inputs:
-      rollback_namespace:
-        description: "Namespace to roll back (leave empty to skip)"
-        required: false
+      action:
+        description: "Choose deployment action"
+        type: choice
+        options:
+          - rollback
+        required: true
+        default: rollback
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_BACKEND: ${{ github.repository }}-backend
-  IMAGE_FRONTEND: ${{ github.repository }}-frontend
+      namespace:
+        description: "Kubernetes namespace"
+        type: choice
+        options:
+          - dev
+          - preprod
+          - release
+        required: true
+
+      deployment:
+        description: "Deployment to roll back"
+        type: choice
+        options:
+          - backend
+          - frontend
+        required: true
+
+# Default permissions: read repository contents only.
+permissions:
+  contents: read
+
+# Prevent duplicate runs for the same branch.
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
+
+  # -----------------------------------------------------
+  # JOB 1: Determine environment and image tag
+  # -----------------------------------------------------
+  prepare:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    outputs:
+      namespace: ${{ steps.env.outputs.namespace }}
+      image_tag: ${{ steps.env.outputs.image_tag }}
+      owner: ${{ steps.env.outputs.owner }}
+      repository: ${{ steps.env.outputs.repository }}
+
+    steps:
+      - name: Determine environment
+        id: env
+        shell: bash
+        run: |
+          # Map the Git branch to its target environment.
+          case "$GITHUB_REF_NAME" in
+            main|master)
+              NAMESPACE="dev"
+              ;;
+            pre-release/v*)
+              NAMESPACE="preprod"
+              ;;
+            release/v*)
+              NAMESPACE="release"
+              ;;
+            *)
+              echo "Unsupported branch: $GITHUB_REF_NAME"
+              exit 1
+              ;;
+          esac
+
+          # Convert the branch name into a Docker-compatible tag.
+          BRANCH_TAG=$(echo "$GITHUB_REF_NAME" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's#[^a-z0-9_.-]#-#g')
+
+          # Use the short commit SHA for traceability.
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAG="${BRANCH_TAG}-${SHORT_SHA}"
+
+          # GHCR image names use lowercase owner/repository names.
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" \
+            | tr '[:upper:]' '[:lower:]')
+
+          REPOSITORY=$(echo "${GITHUB_REPOSITORY##*/}" \
+            | tr '[:upper:]' '[:lower:]')
+
+          echo "namespace=$NAMESPACE" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "repository=$REPOSITORY" >> "$GITHUB_OUTPUT"
+
+          echo "Target namespace: $NAMESPACE"
+          echo "Image tag: $IMAGE_TAG"
+
+  # -----------------------------------------------------
+  # JOB 2: Validate frontend and backend
+  # -----------------------------------------------------
+  validate:
+    needs: prepare
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --include=dev
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
 
       - name: Install backend dependencies
         working-directory: backend
         run: npm ci
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Backend build validation
+      - name: Test backend
         working-directory: backend
-        run: node --check src/index.js
+        run: npm test
 
-      - name: Backend tests
-        working-directory: backend
-        run: npm test --if-present
-
-      - name: Frontend build
-        working-directory: frontend
-        run: npm run build
-
+  # -----------------------------------------------------
+  # JOB 3: Build and push images to GitHub Container Registry
+  # -----------------------------------------------------
   build-and-push:
+    needs: [prepare, validate]
     if: github.event_name == 'push'
-    needs: build-and-test
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      namespace: ${{ steps.meta.outputs.namespace }}
+      frontend_image: ${{ steps.images.outputs.frontend_image }}
+      backend_image: ${{ steps.images.outputs.backend_image }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Tag = <branch-name>-<short-sha> so every image is traceable back to
-      # the exact commit and branch that produced it.
-      - name: Compute image tag and target namespace
-        id: meta
+      - name: Define image names
+        id: images
+        shell: bash
+        env:
+          OWNER: ${{ needs.prepare.outputs.owner }}
+          REPOSITORY: ${{ needs.prepare.outputs.repository }}
+          IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
         run: |
-          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
-          echo "tag=${SAFE_BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          FRONTEND_IMAGE="ghcr.io/${OWNER}/${REPOSITORY}-frontend:${IMAGE_TAG}"
+          BACKEND_IMAGE="ghcr.io/${OWNER}/${REPOSITORY}-backend:${IMAGE_TAG}"
 
-          case "${GITHUB_REF_NAME}" in
-            master) echo "namespace=dev" >> "$GITHUB_OUTPUT" ;;
-            pre-release/v*) echo "namespace=preprod" >> "$GITHUB_OUTPUT" ;;
-            release/v*) echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
-          esac
+          echo "frontend_image=$FRONTEND_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "backend_image=$BACKEND_IMAGE" >> "$GITHUB_OUTPUT"
 
-      # GITHUB_TOKEN is short-lived and scoped to this repo/run only - no
-      # long-lived registry credentials are stored anywhere in the repo.
-      - name: Log in to GHCR
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.backend
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.namespace }}-latest
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build and push frontend image
         uses: docker/build-push-action@v6
@@ -98,63 +197,177 @@ jobs:
           context: .
           file: Dockerfile.frontend
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.namespace }}-latest
+          tags: ${{ steps.images.outputs.frontend_image }}
 
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: true
+          tags: ${{ steps.images.outputs.backend_image }}
+
+  # -----------------------------------------------------
+  # JOB 4: Deploy application images to Kubernetes
+  # -----------------------------------------------------
   deploy:
+    needs: [prepare, build-and-push]
     if: github.event_name == 'push'
-    needs: build-and-push
     runs-on: ubuntu-latest
-    environment: ${{ needs.build-and-push.outputs.namespace }}
+
+    environment: ${{ needs.prepare.outputs.namespace }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # KUBECONFIG_B64 is a base64-encoded kubeconfig stored as an encrypted
-      # GitHub Actions secret, scoped to a service account with access to
-      # only this cluster/namespace set - never printed or written to logs.
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "latest"
 
-      - name: Deploy manifests to ${{ needs.build-and-push.outputs.namespace }}
+      - name: Configure Kubernetes access
+        shell: bash
         env:
-          NAMESPACE: ${{ needs.build-and-push.outputs.namespace }}
-          TAG: ${{ needs.build-and-push.outputs.tag }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
-          set -euo pipefail
-          mkdir -p /tmp/manifests
-          cp k8s/*.yaml /tmp/manifests/
+          # Fail early if the required secret is missing.
+          if [ -z "$KUBECONFIG_B64" ]; then
+            echo "KUBECONFIG_B64 GitHub secret is not configured."
+            exit 1
+          fi
 
-          # Point the deployments at the image just built and pushed.
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/backend-deployment.yaml
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/bullmq-worker-deployment.yaml
-          sed -i "s#ghcr.io/.*-frontend:.*#${REGISTRY}/${IMAGE_FRONTEND}:${TAG}#" /tmp/manifests/frontend-deployment.yaml
+          mkdir -p "$HOME/.kube"
+          chmod 700 "$HOME/.kube"
 
-          # Re-target every manifest at the environment-specific namespace.
-          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/" /tmp/manifests/*.yaml
+          # Decode the supplied kubeconfig into a protected file.
+          echo "$KUBECONFIG_B64" \
+            | base64 --decode > "$HOME/.kube/config"
 
-          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -n "${NAMESPACE}" -f /tmp/manifests/
-          kubectl rollout status -n "${NAMESPACE}" deployment/backend --timeout=120s
-          kubectl rollout status -n "${NAMESPACE}" deployment/frontend --timeout=120s
+          chmod 600 "$HOME/.kube/config"
 
+          # Verify cluster connectivity and credentials.
+          kubectl cluster-info
+
+      - name: Verify target namespace and prerequisites
+        shell: bash
+        env:
+          NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+        run: |
+          # Namespaces and application configuration must be
+          # provisioned before deploying the application.
+          kubectl get namespace "$NAMESPACE"
+
+          kubectl get configmap app-config -n "$NAMESPACE"
+          kubectl get secret app-secrets -n "$NAMESPACE"
+
+      - name: Patch application manifests
+        shell: bash
+        env:
+          NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+        run: |
+          # Create temporary copies; do not modify tracked files.
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          cp k8s/frontend.yaml "$TEMP_DIR/frontend.yaml"
+          cp k8s/backend.yaml "$TEMP_DIR/backend.yaml"
+
+          # Change the namespace only in the temporary copies.
+          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/g" \
+            "$TEMP_DIR/frontend.yaml" \
+            "$TEMP_DIR/backend.yaml"
+
+          # Replace the application image references.
+          sed -i -E \
+            "s#(^[[:space:]]*image:).*#\\1 ${FRONTEND_IMAGE}#" \
+            "$TEMP_DIR/frontend.yaml"
+
+          sed -i -E \
+            "s#(^[[:space:]]*image:).*#\\1 ${BACKEND_IMAGE}#" \
+            "$TEMP_DIR/backend.yaml"
+
+          echo "Frontend manifest:"
+          grep -nE 'namespace:|image:' "$TEMP_DIR/frontend.yaml"
+
+          echo "Backend manifest:"
+          grep -nE 'namespace:|image:' "$TEMP_DIR/backend.yaml"
+
+          # Keep the patched manifests available to the next step.
+          mkdir -p "$RUNNER_TEMP/patched-manifests"
+          cp "$TEMP_DIR/frontend.yaml" "$RUNNER_TEMP/patched-manifests/"
+          cp "$TEMP_DIR/backend.yaml" "$RUNNER_TEMP/patched-manifests/"
+
+      - name: Apply application manifests
+        shell: bash
+        env:
+          NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+        run: |
+          # Apply only frontend/backend application resources.
+          # Do not recreate databases or PVCs in this deployment.
+          kubectl apply \
+            -f "$RUNNER_TEMP/patched-manifests/frontend.yaml"
+
+          kubectl apply \
+            -f "$RUNNER_TEMP/patched-manifests/backend.yaml"
+
+          # Wait until both Deployments finish rolling out.
+          kubectl rollout status deployment/frontend \
+            -n "$NAMESPACE" --timeout=180s
+
+          kubectl rollout status deployment/backend \
+            -n "$NAMESPACE" --timeout=180s
+
+          # Display the final application status.
+          kubectl get deployments,pods,services -n "$NAMESPACE"
+
+  # -----------------------------------------------------
+  # JOB 5: Manual rollback
+  # -----------------------------------------------------
   rollback:
-    if: github.event_name == 'workflow_dispatch' && inputs.rollback_namespace != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback'
     runs-on: ubuntu-latest
-    steps:
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
 
-      # Fast path: undo the last rollout. The slower/more precise path is
-      # re-running this workflow with a previous commit checked out, which
-      # rebuilds and redeploys that exact previous image tag.
-      - name: Roll back last deployment
+    steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "latest"
+
+      - name: Configure Kubernetes access
+        shell: bash
         env:
-          NAMESPACE: ${{ inputs.rollback_namespace }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
-          kubectl rollout undo -n "${NAMESPACE}" deployment/backend
-          kubectl rollout undo -n "${NAMESPACE}" deployment/frontend
+          if [ -z "$KUBECONFIG_B64" ]; then
+            echo "KUBECONFIG_B64 GitHub secret is not configured."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.kube"
+          chmod 700 "$HOME/.kube"
+
+          echo "$KUBECONFIG_B64" \
+            | base64 --decode > "$HOME/.kube/config"
+
+          chmod 600 "$HOME/.kube/config"
+
+          kubectl cluster-info
+
+      - name: Roll back selected Deployment
+        shell: bash
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+        run: |
+          # Restore the previous Deployment revision.
+          kubectl rollout undo "deployment/${DEPLOYMENT}" \
+            -n "$NAMESPACE"
+
+          # Verify rollback completion.
+          kubectl rollout status "deployment/${DEPLOYMENT}" \
+            -n "$NAMESPACE" --timeout=180s
+
+          kubectl get deployment "$DEPLOYMENT" -n "$NAMESPACE"
