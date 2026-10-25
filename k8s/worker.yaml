@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: node-react-postgres-platform-backend:latest
+          imagePullPolicy: IfNotPresent
+
+          # Run the BullMQ worker instead of the HTTP server
+          command: ["npm", "run", "worker"]
+
+          env:
+            - name: NODE_ENV
+              value: "production"
+
+            # Connect the worker to Redis using the Kubernetes Service
+            - name: REDIS_URL
+              value: "redis://redis:6379"

@@ -62,12 +62,25 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: DB_PASSWORD
+                
+            # Write target: primary PostgreSQL service
+            - name: DB_WRITE_URL
+              value: "postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+
+            # Read target: same PostgreSQL service for local simulation
+            - name: DB_READ_URL
+              value: "postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+                
 
             - name: REDIS_URL
               valueFrom:
                 configMapKeyRef:
                   name: app-config
                   key: REDIS_URL
+
+            # Connect backend to the OpenSearch Kubernetes Service
+            - name: SEARCH_URL
+              value: "http://opensearch:9200"
 
           readinessProbe:
             httpGet:
