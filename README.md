@@ -520,43 +520,279 @@ EOF
 
 ## Task 3 — Ingress / API Gateway
 
-```bash
-# example for kind: install nginx-ingress, then
-echo "127.0.0.1 node-react.local" | sudo tee -a /etc/hosts
-kubectl apply -n dev -f k8s/ingress-dev.yaml
+# Task 3 — NGINX Ingress
+
+## Objective
+
+Configure NGINX Ingress to route frontend and backend API traffic through a single hostname in the local Kind Kubernetes cluster.
+
+## Architecture
+
+```text
+                  Browser
+                     |
+                     | node-react.local:8081
+                     v
+          NGINX Ingress Controller
+                     |
+             Ingress: ingress-dev
+                /          \
+               /            \
+              v              v
+      Frontend Service   Backend Service
+           :80                :3000
+              |                |
+              v                v
+        Frontend Pod      Backend Pod
+         NGINX :80       Node.js :3000
 ```
 
-**Request path:** `Browser → Ingress → Service → Pod → PostgreSQL`
-1. Browser resolves `node-react.local` to the ingress controller's IP (via
-   `/etc/hosts` locally, or real DNS in prod).
-2. The Ingress controller matches the path: `/api` or `/api/*` →
-   `backend-service`; everything else → `frontend-service`.
-3. The Service load-balances across matching pods via `kube-proxy` (or an
-   eBPF equivalent).
-4. The backend Pod talks to Postgres via `postgres-service`.
+**Routing rules:**
 
-**Kubernetes DNS:** every Service gets a stable DNS name of the form
-`<service>.<namespace>.svc.cluster.local` — e.g. `backend-service.dev.svc.
-cluster.local`. Pods use this name instead of an IP because pod IPs change
-on every restart/reschedule; the Service is the stable, load-balanced front
-door.
+- `/` → Frontend Service
+- `/api` → Backend Service
 
-**Debugging:**
-- *Ingress reachable but backend is not:* check `kubectl get endpoints
-  backend-service -n dev` — empty means the Service's label selector isn't
-  matching any Ready pod. Then check backend pod logs and its readiness
-  probe status.
-- *Frontend can't reach backend:* confirm `VITE_API_BASE_URL` was baked in
-  correctly at build time, that the browser's requests are going to `/api/*`
-  (not `http://backend-service:4000` — that hostname only resolves inside
-  the cluster, not from the browser), and check the Ingress controller logs
-  for a 404/502 on that path.
+Note: Port `8081` is used for local testing through `kubectl port-forward`. The port-forward must remain running during testing.
 
-**Evolving to microservices:** the Ingress already acts as a lightweight API
-gateway routing by path prefix. Splitting the backend into multiple services
-(e.g. `users-service`, `orders-service`) just means adding more path rules
-(`/api/users`, `/api/orders`, …) pointing at more ClusterIP Services — the
-Ingress, DNS, and probe patterns established here don't change.
+## Kubernetes Resources
+
+| Resource | Name | Purpose |
+|---|---|---|
+| Namespace | `ingress-nginx` | Runs the NGINX Ingress Controller |
+| Deployment | `ingress-nginx-controller` | Processes incoming HTTP requests |
+| Service | `ingress-nginx-controller` | Exposes the Ingress Controller |
+| Namespace | `dev` | Contains application resources |
+| Ingress | `ingress-dev` | Routes frontend and API traffic |
+| Service | `frontend` | Exposes the frontend on port 80 |
+| Service | `backend` | Exposes the backend on port 3000 |
+
+## Directory Structure
+
+```text
+k8s/
+├── namespace-dev.yaml
+├── postgres.yaml
+├── redis.yaml
+├── backend.yaml
+├── frontend.yaml
+└── ingress.yaml
+
+docs/
+└── screenshots/
+    ├── task3-ingress-resources.png
+    ├── task3-ingress-rules.png
+    ├── task3-frontend-browser.png
+    ├── task3-network-api-games.png
+    └── task3-api-health.png
+```
+
+## Deployment Steps
+
+### 1. Verify the Kind Cluster and Ingress Controller
+
+```bash
+kubectl cluster-info --context kind-dev-cluster
+kubectl get nodes
+
+kubectl get pods,services -n ingress-nginx
+kubectl get deployments,pods,services -n dev
+```
+
+### 2. Configure the Ingress Resource
+
+Create the manifest:
+
+```bash
+nano k8s/ingress.yaml
+```
+
+Add the following configuration:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-dev
+  namespace: dev
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: node-react.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 3000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+```
+
+The `/api` path routes requests to the backend, while `/` routes requests to the frontend.
+
+### 3. Apply the Ingress Configuration
+
+```bash
+kubectl apply -f k8s/ingress.yaml
+```
+
+Verify the Ingress resource and routing rules:
+
+```bash
+kubectl get ingress -n dev
+kubectl describe ingress ingress-dev -n dev
+```
+
+Verify the Service endpoints:
+
+```bash
+kubectl get endpointslices -n dev \
+  -l kubernetes.io/service-name=frontend
+
+kubectl get endpointslices -n dev \
+  -l kubernetes.io/service-name=backend
+```
+
+### 4. Configure the Local Hostname
+
+Check whether the hostname is already configured:
+
+```bash
+grep -n "node-react.local" /etc/hosts
+```
+
+If no entry exists, add it:
+
+```bash
+echo "127.0.0.1 node-react.local" | sudo tee -a /etc/hosts
+```
+
+### 5. Start Port Forwarding
+
+Run this command in a separate terminal and keep it running:
+
+```bash
+kubectl port-forward -n ingress-nginx \
+  service/ingress-nginx-controller 8081:80
+```
+
+Open the frontend in a browser:
+
+```text
+http://node-react.local:8081/
+```
+
+## Application Verification
+
+### Frontend
+
+```bash
+curl -i -H "Host: node-react.local" \
+  http://127.0.0.1:8081/
+```
+
+Expected result: The frontend returns a successful HTTP response.
+
+### Backend Health Check
+
+```bash
+curl -i -H "Host: node-react.local" \
+  http://127.0.0.1:8081/api/health
+```
+
+### Backend Games API
+
+```bash
+curl -i -H "Host: node-react.local" \
+  http://127.0.0.1:8081/api/games
+```
+
+Expected result: The requests reach the backend through the Ingress routing rules and return the backend's HTTP response.
+
+## Screenshots
+
+### 1. Ingress Resources
+
+![Ingress resources](docs/screenshots/task3-ingress-resources.png)
+
+Evidence: Ingress resource, frontend and backend Services, and their endpoints.
+
+### 2. Ingress Routing Rules
+
+![Ingress routing rules](docs/screenshots/task3-ingress-rules.png)
+
+Evidence: `kubectl describe ingress ingress-dev -n dev`, showing the hostname, paths, and backend Services.
+
+### 3. Frontend Application
+
+![Frontend in browser](docs/screenshots/task3-frontend-browser.png)
+
+Evidence: Frontend successfully accessible at `http://node-react.local:8081/`.
+
+### 4. Backend API Request
+
+**File:** `task3-network-api-games.png`
+
+Evidence: Browser DevTools Network tab showing the `/api/games` request and response.
+
+### 5. Backend Health Check
+
+![Backend health check](docs/screenshots/task3-api-health.png)
+
+Evidence: Successful response from the backend `/api/health` endpoint through Ingress.
+
+## Troubleshooting
+
+### Local Port Is Already in Use
+
+Use another available local port, such as `8081`:
+
+```bash
+kubectl port-forward -n ingress-nginx \
+  service/ingress-nginx-controller 8081:80
+```
+
+The local port is on the left; the Service port is on the right.
+
+### Ingress Has No Endpoints
+
+```bash
+kubectl get pods -n dev
+kubectl get services -n dev
+kubectl get endpointslices -n dev
+kubectl describe ingress ingress-dev -n dev
+```
+
+Check that the frontend and backend Pods are running and their Services have endpoints.
+
+### Inspect Ingress Controller Logs
+
+```bash
+kubectl logs -n ingress-nginx \
+  deployment/ingress-nginx-controller --tail=100
+```
+
+## Current Status
+
+- Kind cluster is available.
+- NGINX Ingress Controller is installed.
+- Ingress resource is configured for `node-react.local`.
+- `/` is configured to route to the frontend Service.
+- `/api` is configured to route to the backend Service.
+- Verify frontend access through the Ingress port-forward.
+- Verify `/api/health` and `/api/games` through the Ingress.
+- Collect the required screenshots.
+
+**Note:** The Current Status checklist should reflect the actual results of your tests. Do not mark a verification step as completed until you have confirmed it successfully.
+
 
 ## Task 4 — CI/CD & Multi-Environment Deployment
 
