@@ -796,32 +796,151 @@ kubectl logs -n ingress-nginx \
 
 ## Task 4 — CI/CD & Multi-Environment Deployment
 
-`.github/workflows/ci-cd.yml` triggers on push to:
+# Task 4 — CI/CD & Multi-Environment Deployment
 
-| Branch pattern      | Target namespace |
-|----------------------|-------------------|
-| `master`             | `dev`             |
-| `pre-release/v*`     | `preprod`         |
-| `release/v*`         | `release`         |
+## Objective
+Automate application validation, Docker image building, GHCR publishing, and Kubernetes deployment using GitHub Actions.
 
-Pipeline: install deps → build/validate both services → build Docker images
-→ tag as `<branch>-<short-sha>` → push to GHCR → `sed`-patch the k8s
-manifests with the new image tag and target namespace → `kubectl apply`.
+## 1. Workflow Overview
 
-**Secrets:** the registry push uses the ephemeral, repo-scoped
-`GITHUB_TOKEN` — no long-lived registry credentials are stored. Cluster
-access uses a base64-encoded kubeconfig stored as an encrypted Actions
-secret (`KUBECONFIG_B64`), scoped to a service account limited to the
-target namespace(s).
+```text
+Git Push / Pull Request
+        |
+        v
+GitHub Actions
+        |
+        v
+Validate Frontend & Backend
+        |
+        v
+Build Docker Images
+        |
+        v
+Push Images to GHCR
+        |
+        v
+Deploy to Kubernetes
+        |
+        v
+Verify Deployment
+```
 
-**Rollback:** two options, both included —
-1. **Fast:** `kubectl rollout undo deployment/<name> -n <namespace>` (wired
-   up as a manual `workflow_dispatch` job in the pipeline) — reverts to the
-   previous ReplicaSet immediately.
-2. **Precise:** re-run the pipeline against the previous commit/tag, which
-   rebuilds and redeploys that exact known-good image — slower, but
-   guarantees you're not relying on a ReplicaSet Kubernetes hasn't garbage
-   collected yet.
+## 2. Branch-to-Environment Mapping
+
+| Branch | Kubernetes Namespace |
+|---|---|
+| `main` / `master` | `dev` |
+| `pre-release/v*` | `preprod` |
+| `release/v*` | `release` |
+
+## 3. CI/CD Workflow
+
+Workflow file:
+
+```text
+.github/workflows/ci-cd.yml
+```
+
+The workflow performs these steps:
+
+1. Installs frontend and backend dependencies.
+2. Builds the frontend and runs backend tests.
+3. Builds frontend and backend Docker images.
+4. Pushes images to GitHub Container Registry (GHCR).
+5. Tags images using branch name and short commit SHA.
+6. Updates Kubernetes manifests with the correct image and namespace.
+7. Deploys the application and verifies rollout status.
+
+## 4. Self-hosted Runner
+
+Since the Kubernetes cluster runs locally using kind, the deployment job uses a self-hosted runner.
+
+Start the runner:
+
+```bash
+cd ~/Devops/Devops-Project/node-react-postgres-platform/actions-runner
+./run.sh
+```
+
+Keep the runner running while the workflow executes.
+
+## 5. Push Changes to GitHub
+
+```bash
+cd ~/Devops/Devops-Project/node-react-postgres-platform
+
+git add .github/workflows/ci-cd.yml
+git commit -m "feat: add CI/CD pipeline for Task 4"
+git push origin main
+```
+
+If the changes are already committed, skip the commit commands.
+
+## 6. Verify Deployment
+
+Check Kubernetes resources:
+
+```bash
+kubectl get deployments,pods,services -n dev
+```
+
+Verify frontend and backend rollouts:
+
+```bash
+kubectl rollout status deployment/frontend -n dev
+kubectl rollout status deployment/backend -n dev
+```
+
+Check GHCR packages from the repository's **Packages** section:
+
+https://github.com/Tajvir007?tab=packages
+
+Confirm that frontend and backend images have been published.
+
+## 7. Rollback
+
+The workflow supports manual rollback through GitHub Actions.
+
+Alternatively, run:
+
+```bash
+kubectl rollout undo deployment/frontend -n dev
+```
+
+For the backend:
+
+```bash
+kubectl rollout undo deployment/backend -n dev
+```
+
+Verify the rollout after rollback.
+
+## 8. Screenshots
+
+Save screenshots inside `docs/screenshots/`.
+
+| Screenshot | Filename |
+|---|---|
+| Successful GitHub Actions workflow | `task4-github-actions.png` |
+| Frontend and backend GHCR packages | `task4-ghcr-packages.png` |
+| Kubernetes deployment status | `task4-kubernetes.png` |
+| Rollback verification | `task4-rollback.png` |
+
+Add screenshots using Markdown:
+
+```markdown
+![GitHub Actions](screenshots/task4-github-actions.png)
+
+![GHCR Packages](screenshots/task4-ghcr-packages.png)
+
+![Kubernetes Deployment](screenshots/task4-kubernetes.png)
+
+![Rollback](screenshots/task4-rollback.png)
+```
+
+## Summary
+
+Task 4 automates application validation, Docker image publishing, and Kubernetes deployment through GitHub Actions. The pipeline also supports deployment verification and rollback.
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
