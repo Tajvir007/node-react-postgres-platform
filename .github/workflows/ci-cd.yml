@@ -1,4 +1,3 @@
-
 # Cloudly DevOps Assessment - Task 4
 # CI -> Docker Build -> GHCR Push -> Kubernetes Deploy / Rollback
 
@@ -91,6 +90,7 @@ jobs:
             | sed 's#[^a-z0-9_.-]#-#g')
 
           SHORT_SHA="${GITHUB_SHA::7}"
+
           IMAGE_TAG="${BRANCH_TAG}-${SHORT_SHA}"
 
           OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" \
@@ -108,6 +108,7 @@ jobs:
           echo "Image tag: $IMAGE_TAG"
 
   # JOB 2: Validate frontend and backend
+  # Runs on pushes and pull requests.
   validate:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -142,8 +143,11 @@ jobs:
         run: npm test
 
   # JOB 3: Build and push images to GHCR
+  # Runs only on push events, never on pull requests.
   build-and-push:
-    needs: [prepare, validate]
+    needs:
+      - prepare
+      - validate
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
@@ -173,7 +177,10 @@ jobs:
           echo "frontend_image=$FRONTEND_IMAGE" >> "$GITHUB_OUTPUT"
           echo "backend_image=$BACKEND_IMAGE" >> "$GITHUB_OUTPUT"
 
-      - name: Login to GHCR
+          echo "Frontend image: $FRONTEND_IMAGE"
+          echo "Backend image: $BACKEND_IMAGE"
+
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -199,11 +206,14 @@ jobs:
           push: true
           tags: ${{ steps.images.outputs.backend_image }}
 
-  # JOB 4: Deploy application to Kubernetes
+  # JOB 4: Deploy application to the local kind cluster.
+  # This job must run on the Ubuntu machine hosting kind.
   deploy:
-    needs: [prepare, build-and-push]
+    needs:
+      - prepare
+      - build-and-push
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     environment: ${{ needs.prepare.outputs.namespace }}
 
@@ -211,16 +221,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "latest"
+      - name: Verify Kubernetes tools
+        shell: bash
+        run: |
+          command -v kubectl
+          kubectl version --client
+          kind get clusters
 
       - name: Configure Kubernetes access
         shell: bash
         env:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
+          set -euo pipefail
+
           if [ -z "$KUBECONFIG_B64" ]; then
             echo "KUBECONFIG_B64 GitHub secret is not configured."
             exit 1
@@ -235,12 +249,15 @@ jobs:
           chmod 600 "$HOME/.kube/config"
 
           kubectl cluster-info
+          kubectl get nodes
 
       - name: Verify namespace and prerequisites
         shell: bash
         env:
           NAMESPACE: ${{ needs.prepare.outputs.namespace }}
         run: |
+          set -euo pipefail
+
           kubectl get namespace "$NAMESPACE"
           kubectl get configmap app-config -n "$NAMESPACE"
           kubectl get secret app-secrets -n "$NAMESPACE"
@@ -252,29 +269,39 @@ jobs:
           FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
           BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
         run: |
+          set -euo pipefail
+
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           cp k8s/frontend.yaml "$TEMP_DIR/frontend.yaml"
           cp k8s/backend.yaml "$TEMP_DIR/backend.yaml"
 
-          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/g" \
+          # Update namespace fields in the copied manifests.
+          sed -i -E \
+            "s/^([[:space:]]*namespace:).*/\1 ${NAMESPACE}/" \
             "$TEMP_DIR/frontend.yaml" \
             "$TEMP_DIR/backend.yaml"
 
+          # Set the frontend and backend container images.
           sed -i -E \
-            "s#(^[[:space:]]*image:).*#\\1 ${FRONTEND_IMAGE}#" \
+            "s#^([[:space:]]*image:).*#\1 ${FRONTEND_IMAGE}#" \
             "$TEMP_DIR/frontend.yaml"
 
           sed -i -E \
-            "s#(^[[:space:]]*image:).*#\\1 ${BACKEND_IMAGE}#" \
+            "s#^([[:space:]]*image:).*#\1 ${BACKEND_IMAGE}#" \
             "$TEMP_DIR/backend.yaml"
 
           mkdir -p "$RUNNER_TEMP/patched-manifests"
-          cp "$TEMP_DIR/frontend.yaml" "$RUNNER_TEMP/patched-manifests/"
-          cp "$TEMP_DIR/backend.yaml" "$RUNNER_TEMP/patched-manifests/"
+
+          cp "$TEMP_DIR/frontend.yaml" \
+            "$RUNNER_TEMP/patched-manifests/frontend.yaml"
+
+          cp "$TEMP_DIR/backend.yaml" \
+            "$RUNNER_TEMP/patched-manifests/backend.yaml"
 
           echo "Patched manifests for namespace: $NAMESPACE"
+
           grep -nE 'namespace:|image:' \
             "$RUNNER_TEMP/patched-manifests/frontend.yaml" \
             "$RUNNER_TEMP/patched-manifests/backend.yaml"
@@ -284,6 +311,8 @@ jobs:
         env:
           NAMESPACE: ${{ needs.prepare.outputs.namespace }}
         run: |
+          set -euo pipefail
+
           kubectl apply \
             -f "$RUNNER_TEMP/patched-manifests/frontend.yaml"
 
@@ -291,29 +320,34 @@ jobs:
             -f "$RUNNER_TEMP/patched-manifests/backend.yaml"
 
           kubectl rollout status deployment/frontend \
-            -n "$NAMESPACE" --timeout=180s
+            -n "$NAMESPACE" \
+            --timeout=180s
 
           kubectl rollout status deployment/backend \
-            -n "$NAMESPACE" --timeout=180s
+            -n "$NAMESPACE" \
+            --timeout=180s
 
           kubectl get deployments,pods,services -n "$NAMESPACE"
 
   # JOB 5: Manual rollback
   rollback:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "latest"
+      - name: Verify Kubernetes tools
+        shell: bash
+        run: |
+          command -v kubectl
+          kubectl version --client
 
       - name: Configure Kubernetes access
         shell: bash
         env:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
+          set -euo pipefail
+
           if [ -z "$KUBECONFIG_B64" ]; then
             echo "KUBECONFIG_B64 GitHub secret is not configured."
             exit 1
@@ -335,10 +369,13 @@ jobs:
           NAMESPACE: ${{ inputs.namespace }}
           DEPLOYMENT: ${{ inputs.deployment }}
         run: |
+          set -euo pipefail
+
           kubectl rollout undo "deployment/${DEPLOYMENT}" \
             -n "$NAMESPACE"
 
           kubectl rollout status "deployment/${DEPLOYMENT}" \
-            -n "$NAMESPACE" --timeout=180s
+            -n "$NAMESPACE" \
+            --timeout=180s
 
           kubectl get deployment "$DEPLOYMENT" -n "$NAMESPACE"
