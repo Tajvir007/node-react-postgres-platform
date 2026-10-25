@@ -12,7 +12,13 @@ on:
       - 'pre-release/v*'
       - 'release/v*'
 
-  # Manual rollback from GitHub Actions.
+  pull_request:
+    branches:
+      - main
+      - master
+      - 'pre-release/v*'
+      - 'release/v*'
+
   workflow_dispatch:
     inputs:
       action:
@@ -40,20 +46,15 @@ on:
           - frontend
         required: true
 
-# Default permissions: read repository contents only.
 permissions:
   contents: read
 
-# Prevent duplicate runs for the same branch.
 concurrency:
   group: ci-cd-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-
-  # -----------------------------------------------------
   # JOB 1: Determine environment and image tag
-  # -----------------------------------------------------
   prepare:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -69,7 +70,6 @@ jobs:
         id: env
         shell: bash
         run: |
-          # Map the Git branch to its target environment.
           case "$GITHUB_REF_NAME" in
             main|master)
               NAMESPACE="dev"
@@ -86,16 +86,13 @@ jobs:
               ;;
           esac
 
-          # Convert the branch name into a Docker-compatible tag.
           BRANCH_TAG=$(echo "$GITHUB_REF_NAME" \
             | tr '[:upper:]' '[:lower:]' \
             | sed 's#[^a-z0-9_.-]#-#g')
 
-          # Use the short commit SHA for traceability.
           SHORT_SHA="${GITHUB_SHA::7}"
           IMAGE_TAG="${BRANCH_TAG}-${SHORT_SHA}"
 
-          # GHCR image names use lowercase owner/repository names.
           OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" \
             | tr '[:upper:]' '[:lower:]')
 
@@ -110,12 +107,9 @@ jobs:
           echo "Target namespace: $NAMESPACE"
           echo "Image tag: $IMAGE_TAG"
 
-  # -----------------------------------------------------
   # JOB 2: Validate frontend and backend
-  # -----------------------------------------------------
   validate:
-    needs: prepare
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
@@ -147,9 +141,7 @@ jobs:
         working-directory: backend
         run: npm test
 
-  # -----------------------------------------------------
-  # JOB 3: Build and push images to GitHub Container Registry
-  # -----------------------------------------------------
+  # JOB 3: Build and push images to GHCR
   build-and-push:
     needs: [prepare, validate]
     if: github.event_name == 'push'
@@ -207,9 +199,7 @@ jobs:
           push: true
           tags: ${{ steps.images.outputs.backend_image }}
 
-  # -----------------------------------------------------
-  # JOB 4: Deploy application images to Kubernetes
-  # -----------------------------------------------------
+  # JOB 4: Deploy application to Kubernetes
   deploy:
     needs: [prepare, build-and-push]
     if: github.event_name == 'push'
@@ -231,7 +221,6 @@ jobs:
         env:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
-          # Fail early if the required secret is missing.
           if [ -z "$KUBECONFIG_B64" ]; then
             echo "KUBECONFIG_B64 GitHub secret is not configured."
             exit 1
@@ -240,24 +229,19 @@ jobs:
           mkdir -p "$HOME/.kube"
           chmod 700 "$HOME/.kube"
 
-          # Decode the supplied kubeconfig into a protected file.
           echo "$KUBECONFIG_B64" \
             | base64 --decode > "$HOME/.kube/config"
 
           chmod 600 "$HOME/.kube/config"
 
-          # Verify cluster connectivity and credentials.
           kubectl cluster-info
 
-      - name: Verify target namespace and prerequisites
+      - name: Verify namespace and prerequisites
         shell: bash
         env:
           NAMESPACE: ${{ needs.prepare.outputs.namespace }}
         run: |
-          # Namespaces and application configuration must be
-          # provisioned before deploying the application.
           kubectl get namespace "$NAMESPACE"
-
           kubectl get configmap app-config -n "$NAMESPACE"
           kubectl get secret app-secrets -n "$NAMESPACE"
 
@@ -268,19 +252,16 @@ jobs:
           FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
           BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
         run: |
-          # Create temporary copies; do not modify tracked files.
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           cp k8s/frontend.yaml "$TEMP_DIR/frontend.yaml"
           cp k8s/backend.yaml "$TEMP_DIR/backend.yaml"
 
-          # Change the namespace only in the temporary copies.
           sed -i "s/namespace: dev/namespace: ${NAMESPACE}/g" \
             "$TEMP_DIR/frontend.yaml" \
             "$TEMP_DIR/backend.yaml"
 
-          # Replace the application image references.
           sed -i -E \
             "s#(^[[:space:]]*image:).*#\\1 ${FRONTEND_IMAGE}#" \
             "$TEMP_DIR/frontend.yaml"
@@ -289,43 +270,35 @@ jobs:
             "s#(^[[:space:]]*image:).*#\\1 ${BACKEND_IMAGE}#" \
             "$TEMP_DIR/backend.yaml"
 
-          echo "Frontend manifest:"
-          grep -nE 'namespace:|image:' "$TEMP_DIR/frontend.yaml"
-
-          echo "Backend manifest:"
-          grep -nE 'namespace:|image:' "$TEMP_DIR/backend.yaml"
-
-          # Keep the patched manifests available to the next step.
           mkdir -p "$RUNNER_TEMP/patched-manifests"
           cp "$TEMP_DIR/frontend.yaml" "$RUNNER_TEMP/patched-manifests/"
           cp "$TEMP_DIR/backend.yaml" "$RUNNER_TEMP/patched-manifests/"
+
+          echo "Patched manifests for namespace: $NAMESPACE"
+          grep -nE 'namespace:|image:' \
+            "$RUNNER_TEMP/patched-manifests/frontend.yaml" \
+            "$RUNNER_TEMP/patched-manifests/backend.yaml"
 
       - name: Apply application manifests
         shell: bash
         env:
           NAMESPACE: ${{ needs.prepare.outputs.namespace }}
         run: |
-          # Apply only frontend/backend application resources.
-          # Do not recreate databases or PVCs in this deployment.
           kubectl apply \
             -f "$RUNNER_TEMP/patched-manifests/frontend.yaml"
 
           kubectl apply \
             -f "$RUNNER_TEMP/patched-manifests/backend.yaml"
 
-          # Wait until both Deployments finish rolling out.
           kubectl rollout status deployment/frontend \
             -n "$NAMESPACE" --timeout=180s
 
           kubectl rollout status deployment/backend \
             -n "$NAMESPACE" --timeout=180s
 
-          # Display the final application status.
           kubectl get deployments,pods,services -n "$NAMESPACE"
 
-  # -----------------------------------------------------
   # JOB 5: Manual rollback
-  # -----------------------------------------------------
   rollback:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback'
     runs-on: ubuntu-latest
@@ -362,11 +335,9 @@ jobs:
           NAMESPACE: ${{ inputs.namespace }}
           DEPLOYMENT: ${{ inputs.deployment }}
         run: |
-          # Restore the previous Deployment revision.
           kubectl rollout undo "deployment/${DEPLOYMENT}" \
             -n "$NAMESPACE"
 
-          # Verify rollback completion.
           kubectl rollout status "deployment/${DEPLOYMENT}" \
             -n "$NAMESPACE" --timeout=180s
 
