@@ -794,8 +794,6 @@ kubectl logs -n ingress-nginx \
 **Note:** The Current Status checklist should reflect the actual results of your tests. Do not mark a verification step as completed until you have confirmed it successfully.
 
 
-## Task 4 — CI/CD & Multi-Environment Deployment
-
 # Task 4 — CI/CD & Multi-Environment Deployment
 
 ## Objective
@@ -928,15 +926,13 @@ Save screenshots inside `docs/screenshots/`.
 
 Add screenshots using Markdown:
 
-```markdown
-![GitHub Actions](screenshots/task4-github-actions.png)
 
-![GHCR Packages](screenshots/task4-ghcr-packages.png)
+![GitHub Actions](docs/screenshots/task4-github-actions.png)
 
-![Kubernetes Deployment](screenshots/task4-kubernetes.png)
+![GHCR Packages](docs/screenshots/task4-ghcr-packages.png)
 
-![Rollback](screenshots/task4-rollback.png)
-```
+![Kubernetes Deployment](docs/screenshots/task4-kubernetes.png)
+
 
 ## Summary
 
