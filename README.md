@@ -940,39 +940,289 @@ Task 4 automates application validation, Docker image publishing, and Kubernetes
 
 ## Task 5 — Platform Services: Redis, Queue, Search, Read/Write DB
 
-Added to both `docker-compose.yml` and `k8s/`:
-- **Redis** (`redis-deployment.yaml` / `redis-service.yaml`) — the backend
-  connects via `REDIS_URL` (`backend/src/redisClient.js`) and exposes
-  `/api/health/redis`.
-- **Queue** (`bullmq-worker-deployment.yaml`) — BullMQ over Redis. Every
-  `POST /api/items` enqueues an `item-created` job (`backend/src/queue.js`);
-  a separate worker process (`backend/src/worker.js`, same image, different
-  `command:`) consumes it. Decoupling the worker into its own Deployment
-  means it scales and fails independently of the API.
-- **Search** (`search-deployment.yaml` / `search-service.yaml`) — OpenSearch
-  in single-node dev mode. The backend only does a health call today
-  (`backend/src/search.js`, `/api/health/search`) — real indexing would hook
-  into the same queue consumer.
+# Task 5 — Platform Services: Redis, Background Worker and OpenSearch
 
-**Simulated read/write DB cluster:** `backend/src/db.js` holds two separate
-`pg.Pool` instances — `writePool` from `DB_WRITE_URL`, `readPool` from
-`DB_READ_URL`. `write()` (INSERT/UPDATE/DELETE) always uses `writePool`;
-`read()` (SELECT) uses `readPool`. Locally both env vars point at the same
-Postgres instance, but the code already treats them as separate targets, so
-pointing `DB_READ_URL` at a real replica later is a one-line config change —
-no application code changes.
+**Project:** `node-react-postgres-platform`  
+**Environment:** Ubuntu, Docker, Kubernetes Kind  
+**Namespace:** `dev`
 
-**Where routing logic lives:** in this repo it's explicit in application
-code (`write()` vs `read()` helpers). The alternative is a DB proxy
-(PgBouncer, ProxySQL, or a cloud-managed read/write splitter) that makes
-routing transparent to the app — simpler application code, but another
-component to operate and one more hop of latency.
+## Objective
 
-**Replication lag:** a replica can be milliseconds to seconds behind the
-primary. Anything that reads its own recent write — "did my update save?",
-a redirect-after-POST that re-fetches the record, uniqueness checks before
-an insert — must hit the writer/primary, not a replica, or it risks reading
-stale data and behaving as if the write never happened.
+Deploy and verify Redis, the BullMQ background worker, and OpenSearch in Kubernetes. Verify backend connectivity, item creation and retrieval, and asynchronous job processing.
+
+## Architecture
+
+```text
+                 Client / API Request
+                         |
+                         v
+                  Backend Service
+                    Node.js :3000
+                    /     |      \
+                   v      v       v
+             PostgreSQL  Redis  OpenSearch
+               :5432    :6379    :9200
+                          |
+                          v
+                    BullMQ Queue
+                          |
+                          v
+                   Background Worker
+                    item-events queue
+```
+
+## Kubernetes Resources
+
+| Resource | Name | Purpose |
+|---|---|---|
+| Deployment | `backend` | Runs the Node.js API |
+| Deployment / Service | `redis` | Provides Redis connectivity |
+| Deployment | `worker` | Processes BullMQ background jobs |
+| Deployment / Service | `opensearch` | Provides search-cluster functionality |
+| Deployment / Service | `postgres` | Stores application data |
+| Deployment / Service | `frontend` | Serves the React application |
+
+## Directory Structure
+
+```text
+k8s/
+├── backend.yaml
+├── frontend.yaml
+├── postgres.yaml
+├── redis.yaml
+├── opensearch.yaml
+└── worker.yaml
+
+docs/
+└── screenshots/
+    ├── task5-kubernetes-resources.png
+    ├── task5-backend-redis-health.png
+    ├── task5-opensearch-health.png
+    ├── task5-item-create-list.png
+    └── task5-worker-logs.png
+```
+
+## Deployment Steps
+
+### 1. Apply OpenSearch
+
+```bash
+# Deploy OpenSearch and its Kubernetes Service
+kubectl apply -f k8s/opensearch.yaml
+
+# Wait for the deployment to become ready
+kubectl rollout status deployment/opensearch -n dev
+```
+
+### 2. Configure the Backend
+
+The backend must use the Kubernetes Service hostname to connect to OpenSearch.
+
+```yaml
+# Backend environment variable
+- name: SEARCH_URL
+  value: "http://opensearch:9200"
+```
+
+Confirm that this environment variable exists in `k8s/backend.yaml`, then apply the updated manifest.
+
+```bash
+kubectl apply -f k8s/backend.yaml
+kubectl rollout status deployment/backend -n dev
+```
+
+### 3. Deploy the Background Worker
+
+```bash
+# Deploy the BullMQ worker
+kubectl apply -f k8s/worker.yaml
+
+# Wait for the worker deployment
+kubectl rollout status deployment/worker -n dev
+```
+
+The worker runs `npm run worker` and connects to Redis through `redis:6379`.
+
+### 4. Verify Kubernetes Resources
+
+```bash
+# Check all application deployments, pods, and services
+kubectl get deployments,pods,services -n dev
+```
+
+Confirm that the backend, frontend, PostgreSQL, Redis, OpenSearch, and worker resources are ready.
+
+## Application Verification
+
+### 1. Backend and Redis Health
+
+Use the existing backend port-forward on local port `13000`.
+
+```bash
+# Backend health
+curl -i --max-time 10 \
+  http://127.0.0.1:13000/api/health
+
+# Redis health through the backend
+curl -i --max-time 10 \
+  http://127.0.0.1:13000/api/health/redis
+```
+
+Expected result: HTTP `200 OK` for both endpoints.
+
+### 2. OpenSearch Health
+
+```bash
+# Verify the backend can reach OpenSearch
+curl -i --max-time 10 \
+  http://127.0.0.1:13000/api/health/search
+```
+
+Expected result: HTTP `200 OK` with a JSON cluster-health response.
+
+If the check fails:
+
+```bash
+kubectl logs deployment/opensearch -n dev --tail=50
+kubectl describe deployment backend -n dev
+```
+
+### 3. Test Item Creation and Retrieval
+
+```bash
+# Create a test item
+curl -i --max-time 10 -X POST \
+  http://127.0.0.1:13000/api/items \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"task5-kubernetes-worker-test"}'
+
+# Retrieve items and confirm the created item appears
+curl -i --max-time 10 \
+  http://127.0.0.1:13000/api/items
+```
+
+Expected result:
+
+- POST returns `201 Created`.
+- GET returns `200 OK`.
+- The created item appears in the response.
+
+### 4. Verify Background Job Processing
+
+```bash
+# Inspect recent worker logs
+kubectl logs deployment/worker -n dev --since=10m
+```
+
+After creating the test item, verify that the worker processes the corresponding `item-created` job and logs successful completion.
+
+If the new job does not appear:
+
+```bash
+# Inspect backend logs
+kubectl logs deployment/backend -n dev --since=10m
+
+# Inspect worker logs
+kubectl logs deployment/worker -n dev --since=10m
+```
+
+## Screenshots
+
+### 1. Kubernetes Resources
+
+![Task 5 Kubernetes resources](docs/screenshots/task5-kubernetes-resources.png)
+
+[Open screenshot](docs/screenshots/task5-kubernetes-resources.png)
+
+Evidence: Deployments, Pods, and Services for backend, frontend, PostgreSQL, Redis, OpenSearch, and worker.
+
+### 2. Backend and Redis Health
+
+![Task 5 backend and Redis health](docs/screenshots/task5-backend-redis-health.png)
+
+[Open screenshot](docs/screenshots/task5-backend-redis-health.png)
+
+Evidence: Both health endpoints return HTTP 200.
+
+### 3. OpenSearch Health
+
+![Task 5 OpenSearch health](docs/screenshots/task5-opensearch-health.png)
+
+[Open screenshot](docs/screenshots/task5-opensearch-health.png)
+
+Evidence: Successful OpenSearch cluster-health response through the backend.
+
+### 4. Item Creation and Retrieval
+
+![Task 5 item creation and retrieval](docs/screenshots/task5-item-create-list.png)
+
+[Open screenshot](docs/screenshots/task5-item-create-list.png)
+
+Evidence: Successful POST and GET requests showing the created item.
+
+
+> Save your actual screenshots with these filenames under `docs/screenshots/`. The image links above will work after the corresponding files are added to the repository.
+
+## Troubleshooting
+
+### OpenSearch Health Check Fails
+
+```bash
+kubectl get pods,services -n dev
+kubectl logs deployment/opensearch -n dev --tail=50
+kubectl describe deployment backend -n dev
+```
+
+Confirm that OpenSearch is ready and the backend has `SEARCH_URL=http://opensearch:9200`.
+
+### Worker Does Not Process a Job
+
+```bash
+kubectl logs deployment/backend -n dev --since=10m
+kubectl logs deployment/worker -n dev --since=10m
+kubectl get pods,services -n dev
+```
+
+Confirm that the backend and worker use the same Redis Service and queue name, `item-events`.
+
+## Current Status
+
+- [x] Backend and Redis health checks returned HTTP 200.
+- [x] Item creation returned HTTP 201.
+- [x] Item retrieval returned HTTP 200.
+- [x] Kubernetes deployments were observed ready in the previous checks.
+- [ ] Confirm OpenSearch health endpoint returns HTTP 200.
+- [ ] Confirm the newly created job is processed by the worker.
+- [ ] Capture and save all five Task 5 screenshots.
+- [ ] Verify screenshot files and commit the documentation.
+
+Update this checklist after completing the remaining verification steps.
+
+## Git Commit
+
+```bash
+# Review changed files first
+git status --short
+
+# Stage the Task 5 documentation and manifests
+git add k8s/backend.yaml k8s/opensearch.yaml k8s/worker.yaml
+git add docs/screenshots/task5-*.png
+
+# Stage the Markdown file if saved as a separate document
+git add docs/Task-5-Platform-Services.md
+
+# Review staged changes before committing
+git diff --cached --stat
+git diff --cached
+```
+
+Only commit after verifying that the staged changes contain the intended Task 5 files and screenshots.
+
+```bash
+git commit -m "docs: add task 5 platform services"
+git push origin main
+
+
 
 ## Task 6 — Observability, Scaling & Rate Limiting
 
