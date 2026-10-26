@@ -5,6 +5,7 @@ import redis from "./redisClient.js";
 import { enqueueItemCreated } from "./queue.js";
 import { searchHealth } from "./search.js";
 import client from "prom-client";
+import rateLimit from "express-rate-limit";
 
 const app = express();
 // Create a registry to store Prometheus metrics.
@@ -64,6 +65,17 @@ app.get("/metrics", async (req, res) => {
 });
 app.use(cors());
 app.use(express.json());
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    error: "Too many requests. Please try again later.",
+  },
+});
+
+app.use("/api", apiLimiter);
 
 const PORT = process.env.PORT || 4000;
 
