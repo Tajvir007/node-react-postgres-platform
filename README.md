@@ -1221,40 +1221,146 @@ Only commit after verifying that the staged changes contain the intended Task 5 
 ```bash
 git commit -m "docs: add task 5 platform services"
 git push origin main
+```
 
 
 
-## Task 6 — Observability, Scaling & Rate Limiting
 
-`observability/`:
-- **Prometheus** (`prometheus.yaml`) scrapes any pod annotated
-  `prometheus.io/scrape: "true"` (the backend Deployment is annotated
-  accordingly) in the `dev` namespace.
-- **Grafana** (`grafana.yaml`) for dashboards on: backend CPU usage, backend
-  memory usage, request rate & error rate, and replica count over time.
-- **Fluent Bit** (`fluentbit-daemonset.yaml`) runs as a `DaemonSet` (one per
-  node, so it picks up every pod's logs on that node regardless of which
-  pods get scheduled where) and ships backend logs to **Loki**
-  (`loki.yaml`).
-- **HPA** (`hpa-backend.yaml`) scales the backend Deployment 2→6 replicas on
-  CPU (70%) or memory (80%) utilization.
 
-**What to alert on, and why:**
-- **High error rate** (5xx / total requests) — the most direct signal
-  something is actually broken for users, independent of load level.
-- **High CPU / at max HPA replicas** — means the autoscaler is out of
-  headroom; the next symptom is queueing and latency, not just slow scaling.
-- **High p95/p99 latency** — catches degradation (slow queries, GC pauses,
-  a struggling dependency) that error-rate and CPU alone can miss.
-- **Sustained high request rate** without a matching replica increase —
-  usually indicates the HPA is misconfigured or capped, not that traffic is
-  fine.
+# Task 6 — Observability, Scaling & Rate Limiting
 
-**Verifying logs:** `kubectl logs -n dev daemonset/fluent-bit` to confirm
-Fluent Bit is running and tailing files, then query Loki (via Grafana's
-Explore view, `{job="backend"}`) to confirm entries are actually arriving
-and are searchable/filterable by label.
-# node-react-postgres-platform
-# node-react-postgres-platform
-# node-react-postgres-platform
-# node-react-postgres-platform
+**Project:** `node-react-postgres-platform`  
+**Environment:** Ubuntu, Docker, Kubernetes Kind  
+**Namespace:** `dev`
+
+## Objective
+
+Configure Prometheus and Grafana monitoring, backend autoscaling using Kubernetes HPA, and API rate limiting.
+
+## 1. Prometheus Monitoring
+
+Check Prometheus:
+
+```bash
+kubectl get pods,svc -n dev | grep prometheus
+```
+
+Port-forward Prometheus:
+
+```bash
+kubectl port-forward -n dev svc/prometheus 9092:9090
+```
+
+Open [Prometheus Targets](http://localhost:9092/targets) and verify the targets.
+
+**Screenshot:** [Prometheus Targets](/docs/screenshots/task-6-prometheus-targets.png)
+
+### 1. Prometheus Targets
+![Prometheus Targets](docs/screenshots/task-6-prometheus-targets.png)
+
+## 2. Grafana Dashboard
+
+Check Grafana:
+
+```bash
+kubectl get pods,svc -n dev | grep grafana
+```
+
+Port-forward Grafana:
+
+```bash
+kubectl port-forward -n dev svc/grafana 3001:3000
+```
+
+Open [Grafana](http://localhost:3001). Configure Prometheus as a data source and create a dashboard using:
+
+- `http_requests_total`
+- `http_request_duration_seconds`
+
+**Screenshot:** [Grafana Dashboard](screenshots/task-6-grafana-dashboard.png)
+
+![Grafana Dashboard](docs/screenshots/task-6-grafana-dashboard.png)
+
+## 3. Horizontal Pod Autoscaling (HPA)
+
+The backend HPA targets 60% CPU utilization and allows 1–3 replicas.
+
+Check HPA:
+
+```bash
+kubectl get hpa backend-hpa -n dev
+kubectl get deployment backend -n dev
+kubectl describe hpa backend-hpa -n dev
+```
+
+Generate load:
+
+```bash
+kubectl run hpa-load -n dev \
+  --image=busybox:1.36 \
+  --restart=Never --rm -it -- \
+  sh -c 'while true; do wget -q -O- http://backend:3000/api/health/live >/dev/null; done'
+```
+
+Stop the load with `Ctrl+C`, then monitor HPA:
+
+```bash
+kubectl get hpa backend-hpa -n dev --watch
+```
+
+**Observed result:** Backend scaled to 3 replicas during load. CPU utilization later dropped below the target, but the final scale-down was not confirmed.
+
+**Screenshot:** [HPA Scaling](screenshots/task-6-hpa-scaling.png)
+
+![HPA Scaling](docs/screenshots/task-6-hpa-scaling.png)
+
+## 4. API Rate Limiting
+
+The backend uses `express-rate-limit`, configured for 100 requests per 15 minutes on `/api` routes.
+
+Verify the configuration:
+
+```bash
+grep -n "express-rate-limit\|apiLimiter" backend/src/index.js
+```
+
+Port-forward the backend:
+
+```bash
+kubectl port-forward -n dev svc/backend 3100:3000
+```
+
+In another terminal:
+
+```bash
+curl -i http://localhost:3100/api/health/live
+```
+
+**Observed result:** The endpoint returned `200 OK` and rate-limit headers. A `429 Too Many Requests` response was not conclusively confirmed.
+
+**Screenshot:** [Rate Limit Headers](screenshots/task-6-rate-limit-headers.png)
+
+![Rate Limit Headers](docs/screenshots/task-6-rate-limit-headers.png)
+
+## 5. Final Verification
+
+```bash
+kubectl get pods,svc,hpa -n dev
+kubectl rollout status deployment/backend -n dev
+kubectl describe hpa backend-hpa -n dev
+```
+
+The backend, frontend, Grafana, Prometheus, PostgreSQL, Redis, OpenSearch, and worker pods were observed running. HPA metrics were available, and scaling occurred during load.
+
+## Screenshot Checklist
+
+Save screenshots in `docs/screenshots/`:
+
+- [ ] `task-6-prometheus-targets.png`
+- [ ] `task-6-grafana-dashboard.png`
+- [ ] `task-6-hpa-scaling.png`
+- [ ] `task-6-rate-limit-headers.png`
+
+## Summary
+
+Task 6 adds Prometheus monitoring, Grafana visualization, CPU-based backend autoscaling, and API rate limiting. HPA scaled the backend to 3 replicas during load. The `429` rate-limit response and final HPA scale-down still require confirmation.
